@@ -8,7 +8,7 @@ namespace DotRush.Roslyn.Server.Services;
 
 public class ConfigurationService {
     private readonly ILanguageServerConfiguration? configuration;
-    private const string ExtensionId = "dotrush";
+    private const string ExtensionId = "astraeus";
     private const string RoslynId = "roslyn";
 
     private bool? showItemsFromUnimportedNamespaces;

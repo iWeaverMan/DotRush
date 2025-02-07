@@ -32,7 +32,7 @@ public class WorkspaceService : DotRushWorkspace {
     public async Task LoadAsync(CancellationToken cancellationToken) {
         var targets = TryGetTargets();
         if (targets == null) {
-            serverFacade?.ShowError("Found more than one project or solution file. Specify the `dotrush.roslyn.projectOrSolutionFiles` configuration property.");
+            serverFacade?.ShowError("Found more than one project or solution file. Specify the `astraeus.roslyn.projectOrSolutionFiles` configuration property.");
             return;
         }
 
