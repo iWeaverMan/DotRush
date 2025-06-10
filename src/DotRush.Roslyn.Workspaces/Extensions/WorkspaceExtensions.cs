@@ -1,49 +1,57 @@
-using DotRush.Roslyn.Common.Extensions;
-using DotRush.Roslyn.Common.External;
-using DotRush.Roslyn.Common.Logging;
+using DotRush.Common.Extensions;
+using DotRush.Common.External;
+using DotRush.Common.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
 
 namespace DotRush.Roslyn.Workspaces.Extensions;
 
 public static class WorkspaceExtensions {
-    public static IEnumerable<ProjectId> GetProjectIdsWithFilePath(this Solution solution, string filePath) {
-        return solution.GetProjectIdsWithDocumentFilePath(filePath).Concat(solution.GetProjectIdsWithAdditionalDocumentFilePath(filePath)).Distinct();
+    private static string[] sourceCodeExtensions = { ".cs", /* .fs .vb */};
+    private static string[] additionalDocumentExtensions = { ".xaml", /* maybe '.razor' ? */};
+    private static string[] projectFileExtensions = { ".csproj", /* fsproj vbproj */};
+    private static string[] solutionFileExtensions = { ".sln", ".slnf", ".slnx" };
+    private static string[] supportedSolutionExtensions = { ".sln", ".slnf" }; //slnx is not supported by Roslyn for now
+    private static string[] relevantExtensions = sourceCodeExtensions.Concat(additionalDocumentExtensions).ToArray();
+
+    public static bool IsSourceCodeDocument(string filePath) {
+        return sourceCodeExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
     }
-    public static IEnumerable<ProjectId> GetProjectIdsWithDocumentFilePath(this Solution solution, string filePath) {
-        return solution.Projects.Where(project => project.GetDocumentIdsWithFilePath(filePath).Any()).Select(project => project.Id);
+    public static bool IsAdditionalDocument(string filePath) {
+        return additionalDocumentExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
     }
-    public static IEnumerable<ProjectId> GetProjectIdsWithAdditionalDocumentFilePath(this Solution solution, string filePath) {
-        return solution.Projects.Where(project => project.GetAdditionalDocumentIdsWithFilePath(filePath).Any()).Select(project => project.Id);
+    public static bool IsRelevantDocument(string filePath) {
+        return relevantExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
     }
-    public static IEnumerable<DocumentId> GetDocumentIdsWithFolderPath(this Solution solution, string folderPath) {
-        return solution.Projects.SelectMany(project => project.GetDocumentIdsWithFolderPath(folderPath));
+    public static bool IsProjectFile(string filePath) {
+        return projectFileExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
     }
-    public static IEnumerable<DocumentId> GetAdditionalDocumentIdsWithFolderPath(this Solution solution, string folderPath) {
-        return solution.Projects.SelectMany(project => project.GetAdditionalDocumentIdsWithFolderPath(folderPath));
+    public static bool IsSolutionFile(string filePath) {
+        return solutionFileExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
     }
+    public static bool IsSupportedSolutionFile(string filePath) {
+        return supportedSolutionExtensions.Any(it => Path.GetExtension(filePath).Equals(it, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static IEnumerable<ProjectId> GetProjectIdsMayContainsFilePath(this Solution solution, string documentPath) {
-        var projects = solution.Projects.Where(p => PathExtensions.StartsWith(documentPath, Path.GetDirectoryName(p.FilePath) + Path.DirectorySeparatorChar));
-        if (!projects.Any())
+        var projects = solution.Projects.Where(p => PathExtensions.StartsWith(documentPath, Path.GetDirectoryName(p.FilePath) + Path.DirectorySeparatorChar)).ToList();
+        if (projects.Count == 0 || string.IsNullOrEmpty(documentPath))
             return Enumerable.Empty<ProjectId>();
+        if (projects.Count == 1)
+            return projects.Select(p => p.Id);
 
-        var documentFolders = projects.First().GetFolders(documentPath); // 'First()' - Implementation uses only project file path
-        if (documentFolders.Any() && (documentFolders.First().Equals("obj", StringComparison.OrdinalIgnoreCase) || documentFolders.First().Equals("bin", StringComparison.OrdinalIgnoreCase)))
-            return Enumerable.Empty<ProjectId>();
+        var directoryInfo = new DirectoryInfo(Path.GetDirectoryName(documentPath)!);
+        while (directoryInfo != null) {
+            var filteredProjects = projects.Where(p => p.Documents.Any(d => PathExtensions.StartsWith(d.FilePath, directoryInfo.FullName))).ToList();
+            if (filteredProjects.Count != 0)
+                return filteredProjects.Select(p => p.Id);
 
-        var filteredProjects = projects.ToList();
-        foreach (var documentFolder in documentFolders) { 
-            if (filteredProjects.Count == 0)
-                break;
-            filteredProjects = filteredProjects.Where(p => p.HasFolder(documentFolder)).ToList();
+            directoryInfo = directoryInfo.Parent;
         }
 
-        if (filteredProjects.Count > 0)
-            return filteredProjects.Select(p => p.Id);
-            
-        return projects.Select(p => p.Id);
+        return Enumerable.Empty<ProjectId>();
     }
-    
+
     public static IEnumerable<DocumentId> GetDocumentIdsWithFilePathV2(this Solution solution, string? filePath) {
         return solution.Projects.SelectMany(it => it.GetDocumentIdsWithFilePath(filePath)) ?? Enumerable.Empty<DocumentId>();
     }
@@ -53,7 +61,7 @@ public static class WorkspaceExtensions {
 
     public static async Task<ProcessResult> RestoreProjectAsync(this MSBuildWorkspace workspace, string projectPath, CancellationToken cancellationToken) {
         var processInfo = ProcessRunner.CreateProcess("dotnet", $"restore \"{projectPath}\"", captureOutput: true, displayWindow: false, cancellationToken: cancellationToken);
-        var restoreResult = await processInfo.Result;
+        var restoreResult = await processInfo.Task;
 
         if (restoreResult.ExitCode != 0) {
             foreach (var line in restoreResult.OutputLines)

@@ -1,9 +1,9 @@
-using DotRush.Roslyn.Common.Extensions;
-using DotRush.Roslyn.Common.Logging;
+using DotRush.Common.Extensions;
+using DotRush.Common.Logging;
 using DotRush.Roslyn.Navigation.Decompilation;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
-using FileSystemExtensions = DotRush.Roslyn.Common.Extensions.FileSystemExtensions;
+using FileSystemExtensions = DotRush.Common.Extensions.FileSystemExtensions;
 
 namespace DotRush.Roslyn.Navigation;
 
@@ -12,26 +12,28 @@ public class NavigationHost {
     public string GeneratedCodeDirectory { get; private set; }
     public Solution? Solution { get; set; }
 
-    private CurrentClassLogger currentClassLogger;
+    private readonly CurrentClassLogger currentClassLogger;
+    private readonly AssemblyDecompiler assemblyDecompiler;
 
     public NavigationHost() {
         var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
         DecompiledCodeDirectory = Path.Combine(baseDirectory, "_decompiled_");
         GeneratedCodeDirectory = Path.Combine(baseDirectory, "_generated_");
         currentClassLogger = new CurrentClassLogger(nameof(NavigationHost));
+        assemblyDecompiler = new AssemblyDecompiler();
     }
 
     public async Task<string?> EmitDecompiledFileAsync(ISymbol symbol, Project project, CancellationToken cancellationToken) {
-        using var decompiler = new AssemblyDecompiler();
-        var isMetadataCollected = await decompiler.CollectAssemblyMetadataAsync(symbol.ContainingAssembly, project, cancellationToken).ConfigureAwait(false);
-        if (!isMetadataCollected) {
-            currentClassLogger.Debug($"Failed to collect metadata for assembly '{symbol.ContainingAssembly.Name}'");
+        var csharpDecompiler = await assemblyDecompiler.CreateDecompilerAsync(symbol.ContainingAssembly, project, cancellationToken).ConfigureAwait(false);
+        if (csharpDecompiler == null) {
+            currentClassLogger.Debug($"Failed to collect metadata for assembly '{symbol?.ContainingAssembly?.Name}'");
             return null;
         }
 
-        var syntaxTree = decompiler.DecompileType(symbol);
+        var syntaxTree = assemblyDecompiler.DecompileType(csharpDecompiler, symbol);
         var outputFilePath = Path.Combine(DecompiledCodeDirectory, project.Name, symbol.ContainingAssembly.Name, syntaxTree.FileName);
         FileSystemExtensions.WriteAllText(outputFilePath, syntaxTree.ToString());
+        // FileSystemExtensions.MakeFileReadOnly(outputFilePath); // TODO: May be issues with deleting files if they are read-only
         CreateDocument(outputFilePath, null, project);
 
         currentClassLogger.Debug($"Emit decompiled file: {outputFilePath}");
@@ -45,6 +47,7 @@ public class NavigationHost {
         var outputFilePath = Path.Combine(GeneratedCodeDirectory, project.Name, documentPath);
         var sourceText = await location.SourceTree.GetTextAsync(cancellationToken).ConfigureAwait(false);
         FileSystemExtensions.WriteAllText(outputFilePath, sourceText.ToString());
+        // FileSystemExtensions.MakeFileReadOnly(outputFilePath); // TODO: May be issues with deleting files if they are read-only
         CreateDocument(outputFilePath, sourceText, project);
 
         currentClassLogger.Debug($"Emit source generated file: {outputFilePath}");
@@ -55,7 +58,7 @@ public class NavigationHost {
         if (project.Documents.Any(d => PathExtensions.Equals(d.FilePath, documentPath)))
             return;
         if (sourceText == null)
-            sourceText = SourceText.From(File.ReadAllText(documentPath));
+            sourceText = SourceText.From(FileSystemExtensions.TryReadText(documentPath));
         
         var documentName = Path.GetFileName(documentPath);
         var document = project.AddDocument(documentName, sourceText, filePath: documentPath);

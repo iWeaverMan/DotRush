@@ -1,4 +1,6 @@
-import { LanguageClient, ServerOptions } from "vscode-languageclient/node";
+import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
+import { TestExplorerController } from "./testExplorerController";
+import { PublicExports } from "../publicExports";
 import { Extensions } from "../extensions";
 import * as res from '../resources/constants';
 import * as vscode from 'vscode';
@@ -6,47 +8,56 @@ import * as path from 'path';
 
 export class LanguageServerController {
     private static client: LanguageClient;
-    private static command: string;
+    private static serverOptions: ServerOptions;
+    private static clientOptions: LanguageClientOptions;
     private static running: boolean;
 
     public static async activate(context: vscode.ExtensionContext): Promise<void> {
         const serverExecutable = path.join(context.extensionPath, "extension", "bin", "LanguageServer", "DotRush");
         const serverExtension = process.platform === 'win32' ? '.exe' : '';
-        LanguageServerController.command = serverExecutable + serverExtension;
-        
+        LanguageServerController.serverOptions = {
+            command: serverExecutable + serverExtension,
+            options: { cwd: Extensions.getCurrentWorkingDirectory() }
+        };
+        LanguageServerController.clientOptions = {
+            documentSelector: [
+                { pattern: '**/*.cs' },
+                { pattern: '**/*.xaml' }
+            ],
+            diagnosticCollectionName: res.extensionId,
+            progressOnInitialization: true,
+            synchronize: {
+                configurationSection: res.extensionId
+            },
+            connectionOptions: {
+                maxRestartCount: 2,
+            }
+        };
+
         if (await LanguageServerController.shouldQuickPickTargets())
             await LanguageServerController.showQuickPickTargets();
 
         LanguageServerController.start();
 
         context.subscriptions.push(LanguageServerController.client);
-        context.subscriptions.push(vscode.commands.registerCommand(res.commandIdRestartServer, () => LanguageServerController.restart()));
+        context.subscriptions.push(vscode.commands.registerCommand(res.commandIdReloadWorkspace, () => LanguageServerController.reload()));
         context.subscriptions.push(vscode.commands.registerCommand(res.commandIdPickTargets, () => LanguageServerController.showQuickPickTargets()))
-        context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => LanguageServerController.restart()));
         context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(async e => {
-            if (path.extname(e.fileName) !== '.csproj')
+            const extName = path.extname(e.fileName);
+            if (extName !== '.csproj' && extName !== '.props')
                 return;
 
             const value = await vscode.window.showWarningMessage(res.messageProjectChanged, res.messageReload)
             if (value === res.messageReload)
-                LanguageServerController.restart();
+                LanguageServerController.reload();
         }));
     }
 
     private static initialize() {
-        const serverOptions: ServerOptions = { 
-            command: LanguageServerController.command,
-            options: { cwd: Extensions.getCurrentWorkingDirectory() }
-        };
-        LanguageServerController.client = new LanguageClient(res.extensionId, res.extensionId, serverOptions, { 
-            diagnosticCollectionName: res.extensionId,
-            progressOnInitialization: true,
-            synchronize: { 
-                configurationSection: res.extensionId,
-            },
-            connectionOptions: {
-                maxRestartCount: 2,
-            }
+        LanguageServerController.client = new LanguageClient(res.extensionId, res.extensionId, LanguageServerController.serverOptions, LanguageServerController.clientOptions);
+        LanguageServerController.client.onNotification('dotrush/projectLoaded', (project: string) => {
+            TestExplorerController.loadProject(project);
+            PublicExports.instance.onProjectLoaded.invoke(project);
         });
     }
     public static start() {
@@ -56,12 +67,17 @@ export class LanguageServerController {
     }
     public static stop() {
         LanguageServerController.client.stop();
-        LanguageServerController.client.dispose();
         LanguageServerController.running = false;
+        TestExplorerController.unloadProjects();
     }
-    public static restart() {
-        LanguageServerController.stop();
-        LanguageServerController.start();
+    public static reload() {
+        if (!LanguageServerController.running)
+            return;
+
+        const workspaceFolders = vscode.workspace.workspaceFolders?.map(folder => ({ uri: folder.uri.toString(), name: folder.name }));
+        LanguageServerController.client.sendNotification('dotrush/reloadWorkspace', {
+            workspaceFolders: workspaceFolders,
+        });
     }
     public static isRunning(): boolean {
         return LanguageServerController.running;
@@ -69,9 +85,12 @@ export class LanguageServerController {
 
     private static async showQuickPickTargets(): Promise<void> {
         const result = await Extensions.selectProjectOrSolutionFiles();
+        if (result === undefined)
+            return;
+
         await Extensions.putSetting(res.configIdRoslynProjectOrSolutionFiles, result, vscode.ConfigurationTarget.Workspace);
         if (LanguageServerController.isRunning())
-            LanguageServerController.restart();
+            LanguageServerController.reload();
     }
     private static async shouldQuickPickTargets(): Promise<boolean> {
         const projectOrSolutionFiles = Extensions.getSetting<string[]>(res.configIdRoslynProjectOrSolutionFiles);

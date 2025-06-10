@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 using _Path = System.IO.Path;
 
@@ -9,7 +10,7 @@ var target = Argument("target", "vsix");
 var version = Argument("release-version", "1.0.0");
 var configuration = Argument("configuration", "debug");
 var runtime = Argument("arch", RuntimeInformation.RuntimeIdentifier);
-
+var bundle = HasArgument("bundle");
 
 Setup(context => {
 	var date = DateTime.Now;
@@ -17,38 +18,50 @@ Setup(context => {
 	EnsureDirectoryExists(ArtifactsDirectory);
 });
 
-Task("clean").Does(() => {
-	EnsureDirectoryExists(ArtifactsDirectory);
-	CleanDirectories(_Path.Combine(RootDirectory, "src", "DotRush.*", "**", "bin"));
-	CleanDirectories(_Path.Combine(RootDirectory, "src", "DotRush.*", "**", "obj"));
-	CleanDirectories(VSCodeExtensionDirectory);
-});
+Task("clean")
+	.Does(() => {
+		EnsureDirectoryExists(ArtifactsDirectory);
+		CleanDirectories(_Path.Combine(RootDirectory, "src", "DotRush.*", "**", "bin"));
+		CleanDirectories(_Path.Combine(RootDirectory, "src", "DotRush.*", "**", "obj"));
+		CleanDirectories(VSCodeExtensionDirectory);
+	});
 
 Task("server")
 	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Roslyn.Server", "DotRush.Roslyn.Server.csproj"), new DotNetPublishSettings {
 		MSBuildSettings = new DotNetMSBuildSettings { AssemblyVersion = version },
-		OutputDirectory = _Path.Combine(VSCodeExtensionDirectory, "bin", "LanguageServer"),
 		Configuration = configuration,
 		Runtime = runtime,
 	}))
 	.Does(() => {
 		var input = _Path.Combine(VSCodeExtensionDirectory, "bin", "LanguageServer");
-		var output = _Path.Combine(ArtifactsDirectory, $"DotRush.Roslyn.Server.v{version}_{runtime}.zip");
-		Zip(input, output);
+		var output = _Path.Combine(ArtifactsDirectory, $"DotRush.Bundle.Server_{runtime}.zip");
+		EnsureFileDeleted(output);
+		ZipFile.CreateFromDirectory(input, output, CompressionLevel.Optimal, false);
 	});
 
-Task("workspaces")
-	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Essentials.Workspaces", "DotRush.Essentials.Workspaces.csproj"), new DotNetPublishSettings {
+Task("debugging")
+	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Debugging.NetCore", "DotRush.Debugging.NetCore.csproj"), new DotNetPublishSettings {
 		MSBuildSettings = new DotNetMSBuildSettings { AssemblyVersion = version },
-		OutputDirectory = _Path.Combine(VSCodeExtensionDirectory, "bin", "Workspaces"),
 		Configuration = configuration,
 		Runtime = runtime,
-	}));
-
-Task("explorer")
-	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Essentials.TestExplorer", "DotRush.Essentials.TestExplorer.csproj"), new DotNetPublishSettings {
+	}))
+	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Debugging.Unity", "DotRush.Debugging.Unity.csproj"), new DotNetPublishSettings {
 		MSBuildSettings = new DotNetMSBuildSettings { AssemblyVersion = version },
-		OutputDirectory = _Path.Combine(VSCodeExtensionDirectory, "bin", "TestExplorer"),
+		Configuration = configuration,
+		Runtime = runtime,
+	}))
+	.Does(() => {
+		if (!bundle) return;
+		ExecuteCommand("dotnet", $"{_Path.Combine(VSCodeExtensionDirectory, "bin", "TestExplorer", "dotrushde.dll")} --install-ncdbg");
+	});
+
+Task("diagnostics")
+	.Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Debugging.Diagnostics", "src", "Tools", "dotnet-trace", "dotnet-trace.csproj"), new DotNetPublishSettings {
+		OutputDirectory = _Path.Combine(VSCodeExtensionDirectory, "bin", "Diagnostics"),
+		Configuration = configuration,
+		Runtime = runtime,
+	})).Does(() => DotNetPublish(_Path.Combine(RootDirectory, "src", "DotRush.Debugging.Diagnostics", "src", "Tools", "dotnet-gcdump", "dotnet-gcdump.csproj"), new DotNetPublishSettings {
+		OutputDirectory = _Path.Combine(VSCodeExtensionDirectory, "bin", "Diagnostics"),
 		Configuration = configuration,
 		Runtime = runtime,
 	}));
@@ -62,30 +75,33 @@ Task("test")
 			ResultsDirectory = ArtifactsDirectory,
 			Loggers = new[] { "trx" }
 		}
-	// )).Does(() => DotNetTest(_Path.Combine(RootDirectory, "src", "DotRush.Roslyn.Navigation.Tests", "DotRush.Roslyn.Navigation.Tests.csproj"),
-	// 	new DotNetTestSettings {  
-	// 		Configuration = configuration,
-	// 		Verbosity = DotNetVerbosity.Quiet,
-	// 		ResultsDirectory = ArtifactsDirectory,
-	// 		Loggers = new[] { "trx" }
-	// 	}
-	// )).Does(() => DotNetTest(_Path.Combine(RootDirectory, "src", "DotRush.Roslyn.CodeAnalysis.Tests", "DotRush.Roslyn.CodeAnalysis.Tests.csproj"),
-	// 	new DotNetTestSettings {  
-	// 		Configuration = configuration,
-	// 		Verbosity = DotNetVerbosity.Quiet,
-	// 		ResultsDirectory = ArtifactsDirectory,
-	// 		Loggers = new[] { "trx" }
-	// 	}
+	))
+	.Does(() => DotNetTest(_Path.Combine(RootDirectory, "src", "DotRush.Roslyn.CodeAnalysis.Tests", "DotRush.Roslyn.CodeAnalysis.Tests.csproj"),
+		new DotNetTestSettings {  
+			Configuration = configuration,
+			Verbosity = DotNetVerbosity.Quiet,
+			ResultsDirectory = ArtifactsDirectory,
+			Loggers = new[] { "trx" }
+		}
+	))
+	.Does(() => DotNetTest(_Path.Combine(RootDirectory, "src", "DotRush.Debugging.NetCore.Tests", "DotRush.Debugging.NetCore.Tests.csproj"),
+		new DotNetTestSettings {  
+			Configuration = configuration,
+			Verbosity = DotNetVerbosity.Quiet,
+			ResultsDirectory = ArtifactsDirectory,
+			Loggers = new[] { "trx" }
+		}
 	));
 
 Task("vsix")
 	.IsDependentOn("clean")
 	.IsDependentOn("server")
-	.IsDependentOn("workspaces")
-	.IsDependentOn("explorer")
+	.IsDependentOn("debugging")
+	.IsDependentOn("diagnostics")
 	.Does(() => {
 		var vsruntime = runtime.Replace("win-", "win32-").Replace("osx-", "darwin-");
-		var output = _Path.Combine(ArtifactsDirectory, $"DotRush.v{version}_{vsruntime}.vsix");
+		var suffix = bundle ? ".Bundle" : string.Empty;
+		var output = _Path.Combine(ArtifactsDirectory, $"DotRush{suffix}.v{version}_{vsruntime}.vsix");
 		ExecuteCommand("npm", "install");
 		ExecuteCommand("vsce", $"package --target {vsruntime} --out {output} --no-git-tag-version {version}");
 	});
@@ -98,6 +114,10 @@ void ExecuteCommand(string command, string arguments) {
 	}
 	if (StartProcess(command, arguments) != 0)
 		throw new Exception("Command exited with non-zero exit code.");
+}
+void EnsureFileDeleted(string path) {
+	if (FileExists(path)) 
+		DeleteFile(path);
 }
 
 RunTarget(target);

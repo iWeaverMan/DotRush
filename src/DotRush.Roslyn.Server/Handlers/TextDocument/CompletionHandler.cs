@@ -1,146 +1,140 @@
-using System.Text;
+using DotRush.Common.Extensions;
+using DotRush.Common.Logging;
+using DotRush.Roslyn.CodeAnalysis;
 using DotRush.Roslyn.Server.Extensions;
 using DotRush.Roslyn.Server.Services;
+using DotRush.Roslyn.Workspaces.Extensions;
+using EmmyLua.LanguageServer.Framework.Protocol.Capabilities.Client.ClientCapabilities;
+using EmmyLua.LanguageServer.Framework.Protocol.Capabilities.Server;
+using EmmyLua.LanguageServer.Framework.Protocol.Capabilities.Server.Options;
+using EmmyLua.LanguageServer.Framework.Protocol.Message.Completion;
+using EmmyLua.LanguageServer.Framework.Protocol.Model.Kind;
+using EmmyLua.LanguageServer.Framework.Protocol.Model.Markup;
+using EmmyLua.LanguageServer.Framework.Protocol.Model.TextEdit;
+using EmmyLua.LanguageServer.Framework.Protocol.Model.Union;
+using EmmyLua.LanguageServer.Framework.Server.Handler;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
-using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
-using OmniSharp.Extensions.LanguageServer.Protocol.Document;
-using OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using ProtocolModels = EmmyLua.LanguageServer.Framework.Protocol.Model;
 using RoslynCompletionItem = Microsoft.CodeAnalysis.Completion.CompletionItem;
 using RoslynCompletionService = Microsoft.CodeAnalysis.Completion.CompletionService;
-using ProtocolModels = OmniSharp.Extensions.LanguageServer.Protocol.Models;
-using DotRush.Roslyn.Common.Extensions;
-using DotRush.Roslyn.Common.Logging;
-using DotRush.Roslyn.Workspaces.Extensions;
 
 namespace DotRush.Roslyn.Server.Handlers.TextDocument;
 
 public class CompletionHandler : CompletionHandlerBase {
-    private readonly WorkspaceService solutionService;
+    private readonly WorkspaceService workspaceService;
     private readonly ConfigurationService configurationService;
-    private IEnumerable<RoslynCompletionItem>? codeAnalysisCompletionItems;
-    private RoslynCompletionService? roslynCompletionService;
-    private Document? targetDocument;
-    private readonly object? completionOptions;
+    private readonly CurrentClassLogger currentClassLogger;
 
-    public CompletionHandler(WorkspaceService solutionService, ConfigurationService configurationService) {
-        this.solutionService = solutionService;
+    private Dictionary<int, RoslynCompletionItem>? completionItemsCache;
+    private DocumentId? documentId;
+
+    public CompletionHandler(WorkspaceService workspaceService, ConfigurationService configurationService) {
+        this.workspaceService = workspaceService;
         this.configurationService = configurationService;
-        completionOptions = CompletionServiceExtensions.GetCompletionOptions();
+        this.currentClassLogger = new CurrentClassLogger(nameof(CompletionHandler));
     }
 
-    protected override CompletionRegistrationOptions CreateRegistrationOptions(CompletionCapability capability, ClientCapabilities clientCapabilities) {
-        return new CompletionRegistrationOptions {
-            DocumentSelector = LanguageServer.SelectorForSourceCodeDocuments,
-            TriggerCharacters = new[] { ".", " ", "(", "<" },
+    public override void RegisterCapability(ServerCapabilities serverCapabilities, ClientCapabilities clientCapabilities) {
+        serverCapabilities.CompletionProvider = new CompletionOptions {
+            TriggerCharacters = new List<string> { ".", " ", "(", "<" },
             ResolveProvider = true,
         };
     }
+    protected override Task<CompletionResponse?> Handle(CompletionParams request, CancellationToken token) {
+        return SafeExtensions.InvokeAsync(async () => {
+            documentId = workspaceService.Solution?.GetDocumentIdsWithFilePathV2(request.TextDocument.Uri.FileSystemPath).FirstOrDefault();
+            var document = workspaceService.Solution?.GetDocument(documentId);
+            var completionService = RoslynCompletionService.GetService(document);
+            if (completionService == null || document == null)
+                return null;
 
-    public override Task<CompletionList> Handle(CompletionParams request, CancellationToken cancellationToken) {
-        return SafeExtensions.InvokeAsync(new CompletionList(), async () => {
-            var documentId = solutionService.Solution?.GetDocumentIdsWithFilePathV2(request.TextDocument.Uri.GetFileSystemPath()).FirstOrDefault();
-            targetDocument = solutionService.Solution?.GetDocument(documentId);
-            roslynCompletionService = RoslynCompletionService.GetService(targetDocument);
-            if (roslynCompletionService == null || targetDocument == null)
-                return new CompletionList(Enumerable.Empty<CompletionItem>());
-
-            var sourceText = await targetDocument.GetTextAsync(cancellationToken);
+            var sourceText = await document.GetTextAsync(token).ConfigureAwait(false);
             var offset = request.Position.ToOffset(sourceText);
-            var completions = (completionOptions == null || configurationService.ShowItemsFromUnimportedNamespaces)
-                ? await roslynCompletionService.GetCompletionsAsync(targetDocument, offset, cancellationToken: cancellationToken)
-                : await roslynCompletionService.GetCompletionsAsync(targetDocument, offset, completionOptions, cancellationToken);
+            var completions = await completionService.GetCompletionsAsync(document, offset, configurationService, token).ConfigureAwait(false);
 
-            if (completions == null)
-                return new CompletionList(Enumerable.Empty<CompletionItem>());
-
-            codeAnalysisCompletionItems = completions.ItemsList;
-            return new CompletionList(completions.ItemsList.Select(item => new CompletionItem() {
-                Label = item.DisplayTextPrefix + item.DisplayText + item.DisplayTextSuffix,
-                SortText = item.SortText,
-                FilterText = item.FilterText,
-                Detail = item.InlineDescription,
-                Data = item.GetHashCode(),
-                Kind = item.Tags[0].ToCompletionItemKind(),
-                Preselect = item.Rules.MatchPriority == Microsoft.CodeAnalysis.Completion.MatchPriority.Preselect,
-            }));
+            var completionItems = new List<CompletionItem>();
+            completionItemsCache = new Dictionary<int, RoslynCompletionItem>(completions.ItemsList.Count);
+            foreach (var item in completions.ItemsList) {
+                var id = item.GetHashCode();
+                completionItems.Add(new CompletionItem() {
+                    Data = id,
+                    Label = item.DisplayTextPrefix + item.DisplayText + item.DisplayTextSuffix,
+                    FilterText = item.FilterText,
+                    Detail = item.InlineDescription,
+                    InsertTextMode = InsertTextMode.AsIs,
+                    Kind = item.ToCompletionItemKind(),
+                    Preselect = item.Rules.MatchPriority == Microsoft.CodeAnalysis.Completion.MatchPriority.Preselect,
+                    SortText = item.HasPriority() ? $"0_{item.SortText}" : item.SortText,
+                    Deprecated = item.Tags.Contains(InternalWellKnownTags.Deprecated),
+                });
+                completionItemsCache.TryAdd(id, item);
+            }
+            return new CompletionResponse(completionItems);
         });
     }
-    public override async Task<CompletionItem> Handle(CompletionItem request, CancellationToken cancellationToken) {
-        if (targetDocument == null || request.Data == null || roslynCompletionService == null)
-            return request;
+    protected override async Task<CompletionItem> Resolve(CompletionItem item, CancellationToken token) {
+        if (documentId == null || item.Data?.Value == null || completionItemsCache == null)
+            return item;
 
-        var roslynCompletionItem = codeAnalysisCompletionItems?.FirstOrDefault(x => x.GetHashCode() == request.Data.ToObject<int>());
-        if (roslynCompletionItem == null)
-            return request;
+        if (!completionItemsCache.TryGetValue((int)item.Data.Value, out var roslynCompletionItem)) {
+            CurrentSessionLogger.Debug($"Completion item with data:[{item.Data.Value}] not found in cache.");
+            return item;
+        }
 
-        IEnumerable<TextEdit>? additionalTextEdits = null;
-        TextEdit? currentLineTextEdit = null;
-        StringOrMarkupContent? documentation = null;
+        var document = workspaceService.Solution?.GetDocument(documentId);
+        if (document == null || workspaceService.Solution == null) {
+            CurrentSessionLogger.Debug($"Document with identifier:[{documentId}] not found.");
+            return item;
+        }
 
-        if (request.Documentation is null) {
-            var description = await roslynCompletionService.GetDescriptionAsync(targetDocument, roslynCompletionItem, cancellationToken);
+        var completionService = RoslynCompletionService.GetService(document);
+        if (completionService == null) {
+            CurrentSessionLogger.Debug($"Roslyn completion service not found for document:[{documentId}].");
+            return item;
+        }
+
+        if (item.Documentation == null) {
+            var description = await completionService.GetDescriptionAsync(document, roslynCompletionItem, token).ConfigureAwait(false);
             if (description != null) {
-                var stringBuilder = new StringBuilder();
-                MarkdownConverter.TaggedTextToMarkdown(description.TaggedParts, stringBuilder);
-                documentation = new StringOrMarkupContent(new MarkupContent() {
+                item.Documentation = new MarkupContent() {
                     Kind = MarkupKind.Markdown,
-                    Value = stringBuilder.ToString()
-                });
+                    Value = MarkdownConverter.TaggedTextToMarkdown(description.TaggedParts)
+                };
             }
         }
 
-        if (request.AdditionalTextEdits is null || request.TextEdit is null) {
-            var changes = await roslynCompletionService.GetChangeAsync(targetDocument, roslynCompletionItem, cancellationToken: cancellationToken);
-            var sourceText = await targetDocument.GetTextAsync(cancellationToken);
-            if (changes?.TextChanges == null) {
-                CurrentSessionLogger.Debug($"No text changes found for item:[{request.Label}]");
-                return request;
-            }
-            (currentLineTextEdit, additionalTextEdits) = ArrangeTextEdits(changes.TextChanges, roslynCompletionItem, sourceText);
+        var changes = await completionService.GetChangeAsync(document, roslynCompletionItem, cancellationToken: token).ConfigureAwait(false);
+        var sourceText = await document.GetTextAsync(token).ConfigureAwait(false);
+        if (changes?.TextChanges == null) {
+            currentClassLogger.Debug($"No text changes found for item:[{item.Label}]");
+            return item;
         }
 
-        return new CompletionItem {
-            Label = request.Label,
-            SortText = request.SortText,
-            FilterText = request.FilterText,
-            Detail = request.Detail,
-            Kind = request.Kind,
-            Preselect = request.Preselect,
-            Documentation = documentation,
-            InsertTextMode = InsertTextMode.AsIs,
-            AdditionalTextEdits = request.AdditionalTextEdits ?? TextEditContainer.From(additionalTextEdits),
-            TextEdit = request.TextEdit ?? TextEditOrInsertReplaceEdit.From(currentLineTextEdit!)
-        };
+        (item.TextEdit, item.AdditionalTextEdits) = ArrangeTextEdits(changes.TextChanges, roslynCompletionItem.Span, sourceText);
+        return item;
     }
 
-    private static (TextEdit, IEnumerable<TextEdit>) ArrangeTextEdits(IEnumerable<TextChange> changes, RoslynCompletionItem completionItem, SourceText sourceText) {
+    private static (TextEditOrInsertReplaceEdit, List<AnnotatedTextEdit>) ArrangeTextEdits(IEnumerable<TextChange> changes, TextSpan completionSpan, SourceText sourceText) {
         var additionalTextEdits = changes
-            .Where(x => !x.Span.IntersectsWith(completionItem.Span))
-            .Select(x => x.ToTextEdit(sourceText))
+            .Where(x => !x.Span.IntersectsWith(completionSpan))
+            .Select(x => x.ToAnnotatedTextEdit(sourceText))
             .ToList();
 
-        var currentLineTextEdit = changes
-            .First(x => x.Span.IntersectsWith(completionItem.Span))
+        var textEdit = changes
+            .FirstOrDefault(x => x.Span.IntersectsWith(completionSpan))
             .ToTextEdit(sourceText);
 
-        // Remove previous text manualy because fucking vscode bydesign
-        var completionItemRange = completionItem.Span.ToRange(sourceText);
-        additionalTextEdits.Add(new TextEdit() {
+        // Remove previous text behind the cursor position manualy
+        // because fucking vscode bydesign
+        additionalTextEdits.Add(new ProtocolModels.TextEdit.AnnotatedTextEdit() {
             NewText = string.Empty,
-            Range = new ProtocolModels.Range() {
-                Start = currentLineTextEdit.Range.Start,
-                End = completionItemRange.Start
-            }
-        });
-        additionalTextEdits.Add(new TextEdit() {
-            NewText = string.Empty,
-            Range = new ProtocolModels.Range() {
-                Start = completionItemRange.End,
-                End = currentLineTextEdit.Range.End,
+            Range = new ProtocolModels.DocumentRange() {
+                Start = textEdit.Range.Start,
+                End = completionSpan.Start.ToPosition(sourceText)
             }
         });
 
-        return (currentLineTextEdit, additionalTextEdits);
+        return (new TextEditOrInsertReplaceEdit(textEdit), additionalTextEdits);
     }
 }

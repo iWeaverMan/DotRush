@@ -4,18 +4,14 @@ import { LanguageServerController } from './controllers/languageServerController
 import { StateController } from './controllers/stateController';
 import { StatusBarController } from './controllers/statusbarController';
 import { TestExplorerController } from './controllers/testExplorerController';
+import { ExternalTypeResolver } from './features/externalTypeResolver';
 import { ModulesView } from './features/modulesView';
+import { PerformanceView } from './features/performanceView';
 import { Interop } from './interop/interop';
 import { PublicExports } from './publicExports';
-import * as res from './resources/constants';
 import * as vscode from 'vscode';
 
 export async function activate(context: vscode.ExtensionContext) {
-	if (vscode.extensions.getExtension(res.extensionMicrosoftId)) {
-		vscode.window.showErrorMessage(res.messageOmniSharpAlreadyInstalled, { modal: true });
-		return;
-	}
-
 	const exports = new PublicExports();
 	Interop.initialize(context.extensionPath);
 
@@ -23,12 +19,14 @@ export async function activate(context: vscode.ExtensionContext) {
 		StateController.activate(context);
 		StatusBarController.activate(context);
 		ContextMenuController.activate(context);
-		LanguageServerController.activate(context);
 		TestExplorerController.activate(context);
+		LanguageServerController.activate(context);
 	}
 
 	DebugAdapterController.activate(context);
 	ModulesView.feature.activate(context);
+	PerformanceView.feature.activate(context);
+	ExternalTypeResolver.feature.activate(context);
 
 	return exports;
 }

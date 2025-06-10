@@ -1,24 +1,45 @@
 using System.Collections.Immutable;
-using System.Collections.ObjectModel;
+using DotRush.Common.Logging;
 using DotRush.Roslyn.CodeAnalysis.Extensions;
-using DotRush.Roslyn.Common.Logging;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 
 namespace DotRush.Roslyn.CodeAnalysis.Components;
 
 public class DiagnosticAnalyzersLoader : IComponentLoader<DiagnosticAnalyzer> {
-    public MemoryCache<DiagnosticAnalyzer> ComponentsCache { get; } = new MemoryCache<DiagnosticAnalyzer>();
-    private readonly CurrentClassLogger currentClassLogger = new CurrentClassLogger(nameof(DiagnosticAnalyzersLoader));
+    private readonly CurrentClassLogger currentClassLogger;
+    private readonly IAdditionalComponentsProvider additionalComponentsProvider;
 
-    public ImmutableArray<DiagnosticAnalyzer> GetComponents(Project? project = null) {
-        if (project == null)
-            return ImmutableArray<DiagnosticAnalyzer>.Empty;
+    public MemoryCache<DiagnosticAnalyzer> ComponentsCache { get; }
 
-        return ComponentsCache.GetOrCreate(project.Name, () => LoadFromProject(project)).ToImmutableArray();
+    public DiagnosticAnalyzersLoader(IAdditionalComponentsProvider additionalComponentsProvider) {
+        this.additionalComponentsProvider = additionalComponentsProvider;
+        currentClassLogger = new CurrentClassLogger(nameof(DiagnosticAnalyzersLoader));
+        ComponentsCache = new MemoryCache<DiagnosticAnalyzer>();
     }
 
-    public ReadOnlyCollection<DiagnosticAnalyzer> LoadFromProject(Project project) {
+    public ImmutableArray<DiagnosticAnalyzer> GetComponents(Project project) {
+        return ComponentsCache.GetOrCreate(project.Name, () => {
+            var result = new List<DiagnosticAnalyzer>();
+            result.AddRange(LoadFromDotRush());
+            result.AddRange(LoadFromAssembly(KnownAssemblies.CommonFeaturesAssemblyName));
+            result.AddRange(LoadFromAssembly(KnownAssemblies.CSharpFeaturesAssemblyName));
+
+            result.AddRange(LoadFromProject(project));
+
+            if (additionalComponentsProvider.IsEnabled) {
+                foreach (var assemblyName in additionalComponentsProvider.GetAdditionalAssemblies())
+                    result.AddRange(LoadFromAssembly(assemblyName));
+            }
+
+            return result;
+        }).ToImmutableArray();
+    }
+    public ImmutableArray<DiagnosticAnalyzer> GetSuppressors(Project project) {
+        return GetComponents(project).Where(it => it is DiagnosticSuppressor).ToImmutableArray();
+    }
+
+    public List<DiagnosticAnalyzer> LoadFromProject(Project project) {
         var result = new List<DiagnosticAnalyzer>();
         foreach (var reference in project.AnalyzerReferences)
             foreach (var analyzer in reference.GetAnalyzers(project.Language)) {
@@ -27,15 +48,13 @@ public class DiagnosticAnalyzersLoader : IComponentLoader<DiagnosticAnalyzer> {
             }
 
         currentClassLogger.Debug($"Loaded {result.Count} analyzers from project '{project.Name}'");
-        return new ReadOnlyCollection<DiagnosticAnalyzer>(result);
+        return result;
     }
-
-    [Obsolete("Not used anymore")]
-    public ReadOnlyCollection<DiagnosticAnalyzer> LoadFromAssembly(string assemblyName) {
+    public List<DiagnosticAnalyzer> LoadFromAssembly(string assemblyName) {
         var result = new List<DiagnosticAnalyzer>();
         var assemblyTypes = ReflectionExtensions.LoadAssembly(assemblyName);
         if (assemblyTypes == null)
-            return new ReadOnlyCollection<DiagnosticAnalyzer>(result);
+            return result;
 
         var analyzersInfo = assemblyTypes.Where(x => !x.IsAbstract && x.IsSubclassOf(typeof(DiagnosticAnalyzer)));
         foreach (var analyzerInfo in analyzersInfo) {
@@ -51,6 +70,9 @@ public class DiagnosticAnalyzersLoader : IComponentLoader<DiagnosticAnalyzer> {
             }
         }
         currentClassLogger.Debug($"Loaded {result.Count} analyzers form assembly '{assemblyName}'");
-        return new ReadOnlyCollection<DiagnosticAnalyzer>(result);
+        return result;
+    }
+    public List<DiagnosticAnalyzer> LoadFromDotRush() {
+        return new List<DiagnosticAnalyzer>();
     }
 }

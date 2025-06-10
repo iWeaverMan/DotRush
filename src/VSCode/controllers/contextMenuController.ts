@@ -22,9 +22,9 @@ export class ContextMenuController {
                 vscode.tasks.executeTask(DotNetTaskProvider.getCleanTask(projectFile));
         }));
         context.subscriptions.push(vscode.commands.registerCommand(res.commandIdSetStartupProject, async (path: vscode.Uri) => {
-            const projectFile = await Extensions.selectProjectOrSolutionFile(path);
+            const projectFile = await Extensions.selectProjecFile(path);
             if (projectFile !== undefined)
-                StatusBarController.performSelectProject(projectFile);
+                StatusBarController.updateStatusBarState(projectFile);
         }));
 
         context.subscriptions.push(vscode.commands.registerCommand(res.commandIdBuildWorkspace, async () => {

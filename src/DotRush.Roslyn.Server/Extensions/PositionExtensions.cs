@@ -1,8 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
-using OmniSharp.Extensions.LanguageServer.Protocol;
-using ProtocolModels = OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using ProtocolModels = EmmyLua.LanguageServer.Framework.Protocol.Model;
 
 namespace DotRush.Roslyn.Server.Extensions;
 
@@ -13,27 +12,30 @@ public static class PositionExtensions {
 
         return sourceText.Lines.GetPosition(new LinePosition(position.Line, position.Character));
     }
+    public static ProtocolModels.DocumentRange ToRange(this ProtocolModels.Position position) {
+        return new ProtocolModels.DocumentRange(position, position);
+    }
 
     public static ProtocolModels.Position ToPosition(this int offset, SourceText sourceText) {
         var linePosition = sourceText.Lines.GetLinePosition(offset);
         return new ProtocolModels.Position(linePosition.Line, linePosition.Character);
     }
 
-    public static ProtocolModels.Range ToRange(this LinePositionSpan span) {
-        return new ProtocolModels.Range(
+    public static ProtocolModels.DocumentRange ToRange(this LinePositionSpan span) {
+        return new ProtocolModels.DocumentRange(
             new ProtocolModels.Position(span.Start.Line, span.Start.Character),
             new ProtocolModels.Position(span.End.Line, span.End.Character)
         );
     }
 
-    public static ProtocolModels.Range ToRange(this TextSpan span, SourceText sourceText) {
-        return new ProtocolModels.Range(
+    public static ProtocolModels.DocumentRange ToRange(this TextSpan span, SourceText sourceText) {
+        return new ProtocolModels.DocumentRange(
             span.Start.ToPosition(sourceText),
             span.End.ToPosition(sourceText)
         );
     }
 
-    public static ProtocolModels.Range ToRange(this Location location) {
+    public static ProtocolModels.DocumentRange ToRange(this Location location) {
         return location.GetLineSpan().Span.ToRange();
     }
 
@@ -42,7 +44,7 @@ public static class PositionExtensions {
             return null;
 
         return new ProtocolModels.Location() {
-            Uri = DocumentUri.FromFileSystemPath(filePath ?? location.SourceTree.FilePath),
+            Uri = filePath ?? location.SourceTree.FilePath,
             Range = location.SourceSpan.ToRange(location.SourceTree.GetText())
         };
     }
@@ -52,22 +54,16 @@ public static class PositionExtensions {
             return null;
 
         return new ProtocolModels.Location() {
-            Uri = DocumentUri.FromFileSystemPath(location.Document.FilePath),
+            Uri = location.Document.FilePath,
             Range = location.Location.SourceSpan.ToRange(sourceText)
         };
     }
 
-    public static TextSpan ToTextSpan(this ProtocolModels.Range range, SourceText sourceText) {
+    public static TextSpan ToTextSpan(this ProtocolModels.DocumentRange range, SourceText sourceText) {
         return TextSpan.FromBounds(
             range.Start.ToOffset(sourceText),
             range.End.ToOffset(sourceText)
         );
-    }
-
-    public static TextSpan ToMergedTextSpan(this IEnumerable<TextSpan> textSpans) {
-        var start = textSpans.Min(it => it.Start);
-        var end = textSpans.Max(it => it.End);
-        return TextSpan.FromBounds(start, end);
     }
 
     public static ProtocolModels.Location? ToDecompiledUnknownLocation(string? filePath) {
@@ -75,10 +71,18 @@ public static class PositionExtensions {
             return null;
 
         return new ProtocolModels.Location() {
-            Uri = DocumentUri.FromFileSystemPath(filePath),
+            Uri = filePath,
             Range = EmptyRange
         };
     }
 
-    public static ProtocolModels.Range EmptyRange => new ProtocolModels.Range(new ProtocolModels.Position(0, 0), new ProtocolModels.Position(0, 0));
+    public static ProtocolModels.DocumentRange EmptyRange => new ProtocolModels.DocumentRange(EmptyPosition, EmptyPosition);
+    public static ProtocolModels.Position EmptyPosition => new ProtocolModels.Position(0, 0);
+
+    public static bool OverlapsWith(this ProtocolModels.DocumentRange baseRange, ProtocolModels.DocumentRange otherRange) {
+        return baseRange.Start.Line <= otherRange.End.Line
+            && baseRange.End.Line >= otherRange.Start.Line
+            && baseRange.Start.Character <= otherRange.End.Character
+            && baseRange.End.Character >= otherRange.Start.Character;
+    }
 }

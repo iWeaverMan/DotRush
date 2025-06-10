@@ -1,13 +1,19 @@
-using Microsoft.CodeAnalysis.Text;
+using DotRush.Roslyn.CodeAnalysis;
+using EmmyLua.LanguageServer.Framework.Protocol.Model.TextEdit;
+using Microsoft.CodeAnalysis.Completion;
 using Microsoft.CodeAnalysis.Tags;
-using ProtocolModels = OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using Microsoft.CodeAnalysis.Text;
+using ProtocolModels = EmmyLua.LanguageServer.Framework.Protocol.Message.Completion;
 
 namespace DotRush.Roslyn.Server.Extensions;
 
 public static class CompletionExtensions {
-    public static ProtocolModels.CompletionItemKind ToCompletionItemKind(this string tag) {
-        switch (tag) {
-            case WellKnownTags.Public: 
+    public static ProtocolModels.CompletionItemKind ToCompletionItemKind(this CompletionItem item) {
+        if (item.Tags.Length == 0)
+            return ProtocolModels.CompletionItemKind.Text;
+
+        switch (item.Tags[0]) {
+            case WellKnownTags.Public:
             case WellKnownTags.Protected:
             case WellKnownTags.Private:
             case WellKnownTags.Internal: return ProtocolModels.CompletionItemKind.Keyword;
@@ -19,7 +25,7 @@ public static class CompletionExtensions {
             case WellKnownTags.Class: return ProtocolModels.CompletionItemKind.Class;
             case WellKnownTags.Constant: return ProtocolModels.CompletionItemKind.Constant;
             case WellKnownTags.Delegate: return ProtocolModels.CompletionItemKind.Interface;
-            
+
             case WellKnownTags.Enum: return ProtocolModels.CompletionItemKind.Enum;
             case WellKnownTags.EnumMember: return ProtocolModels.CompletionItemKind.EnumMember;
             case WellKnownTags.Event: return ProtocolModels.CompletionItemKind.Event;
@@ -48,8 +54,23 @@ public static class CompletionExtensions {
         return ProtocolModels.CompletionItemKind.Text;
     }
 
-    public static ProtocolModels.TextEdit ToTextEdit(this TextChange change, SourceText sourceText) {
-        return new ProtocolModels.TextEdit() {
+    public static bool HasPriority(this CompletionItem item) {
+        if (item.Rules.MatchPriority == Microsoft.CodeAnalysis.Completion.MatchPriority.Preselect)
+            return true;
+        if (item.Tags.Contains(InternalWellKnownTags.TargetTypeMatch))
+            return true;
+
+        return false;
+    }
+
+    public static TextEdit ToTextEdit(this TextChange change, SourceText sourceText) {
+        return new TextEdit() {
+            NewText = change.NewText ?? string.Empty,
+            Range = change.Span.ToRange(sourceText)
+        };
+    }
+    public static AnnotatedTextEdit ToAnnotatedTextEdit(this TextChange change, SourceText sourceText) {
+        return new AnnotatedTextEdit() {
             NewText = change.NewText ?? string.Empty,
             Range = change.Span.ToRange(sourceText)
         };

@@ -21,6 +21,10 @@ dotnet_analyzer_diagnostic.category-Usage.severity = suggestion
 
 # CA1001: Types that own disposable fields should be disposable
 dotnet_diagnostic.CA1001.severity = none
+# CA1822: Mark members as static
+dotnet_diagnostic.CA1822.severity = silent
+# CA1852: Make class sealed
+dotnet_diagnostic.CA1852.severity = silent
 # IDE0290: Use primary constructor
 dotnet_diagnostic.IDE0290.severity = none
 # IDE0078: Use pattern matching
@@ -31,6 +35,8 @@ dotnet_diagnostic.IDE0066.severity = none
 dotnet_diagnostic.IDE0028.severity = none
 # IDE0058: Expression value is never used
 dotnet_diagnostic.IDE0058.severity = none
+# VSTHRD003: Avoid awaiting or returning a Task
+dotnet_diagnostic.VSTHRD003.severity = none
 
 # Organize usings
 dotnet_separate_import_directive_groups = false
@@ -61,7 +67,7 @@ csharp_using_directive_placement = outside_namespace:warning
 
 # New line preferences
 csharp_new_line_before_catch = false
-csharp_new_line_before_else = false
+csharp_new_line_before_else = true
 csharp_new_line_before_finally = false
 csharp_new_line_before_members_in_anonymous_types = false
 csharp_new_line_before_members_in_object_initializers = false

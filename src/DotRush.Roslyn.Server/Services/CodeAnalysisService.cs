@@ -1,86 +1,82 @@
-using Microsoft.CodeAnalysis;
-using OmniSharp.Extensions.LanguageServer.Protocol.Server;
-using OmniSharp.Extensions.LanguageServer.Protocol;
-using OmniSharp.Extensions.LanguageServer.Protocol.Models;
-using OmniSharp.Extensions.LanguageServer.Protocol.Document;
-using DotRush.Roslyn.Common.Extensions;
-using DotRush.Roslyn.Workspaces.Extensions;
-using DotRush.Roslyn.Server.Extensions;
+using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
+using DotRush.Common.Extensions;
 using DotRush.Roslyn.CodeAnalysis;
-using ProtocolModels = OmniSharp.Extensions.LanguageServer.Protocol.Models;
+using DotRush.Roslyn.CodeAnalysis.Components;
+using DotRush.Roslyn.CodeAnalysis.Diagnostics;
+using DotRush.Roslyn.Server.Extensions;
+using EmmyLua.LanguageServer.Framework.Protocol.Message.Client.PublishDiagnostics;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CodeFixes;
+using Microsoft.CodeAnalysis.CodeRefactorings;
+using Microsoft.CodeAnalysis.Text;
 
 namespace DotRush.Roslyn.Server.Services;
 
-public class CodeAnalysisService {
-    private const int AnalysisFrequencyMs = 500;
-
-    private readonly ILanguageServerFacade? serverFacade;
+public class CodeAnalysisService : IAdditionalComponentsProvider {
     private readonly ConfigurationService configurationService;
-    private readonly WorkspaceService workspaceService;
-    private CancellationTokenSource compilationTokenSource;
+    private readonly CodeActionHost codeActionHost;
+    private readonly CompilationHost compilationHost;
+    private readonly Thread workerThread;
+    private readonly BlockingCollection<Func<Task>> workerTasks;
 
-    public CompilationHost CompilationHost { get; init; }
-    public CodeActionHost CodeActionHost { get; init; }
-
-    public CodeAnalysisService(ILanguageServerFacade? serverFacade, ConfigurationService configurationService, WorkspaceService workspaceService) {
+    public CodeAnalysisService(ConfigurationService configurationService) {
         this.configurationService = configurationService;
-        this.workspaceService = workspaceService;
-        this.serverFacade = serverFacade;
+        this.codeActionHost = new CodeActionHost(this);
+        this.compilationHost = new CompilationHost(this);
+        this.workerTasks = new BlockingCollection<Func<Task>>();
+        this.workerThread = new Thread(() => {
+            foreach (var currentTask in workerTasks.GetConsumingEnumerable()) {
+                Func<Task> latestTask = currentTask;
+                // Drain queue and keep the most recent task
+                while (workerTasks.TryTake(out var task))
+                    latestTask = task;
 
-        compilationTokenSource = new CancellationTokenSource();
-        CodeActionHost = new CodeActionHost();
-        CompilationHost = new CompilationHost();
-        CompilationHost.DiagnosticsChanged += OnDiagnosticsCollectionChanged;
+                SafeExtensions.InvokeAsync(latestTask).Wait();
+            }
+        });
+        this.workerThread.IsBackground = true;
     }
 
-    public Task PublishDiagnosticsAsync(string documentPath) {
-        ResetCancellationToken();
-        if (workspaceService.Solution == null)
-            return Task.CompletedTask;
+    public void StartWorkerThread() {
+        workerThread.Start();
+    }
+    public void RequestDiagnosticsPublishing(IEnumerable<Document> documents) {
+        if (!documents.Any())
+            return;
 
-        var cancellationToken = compilationTokenSource.Token;
-        var projectIdsByDocument = workspaceService.Solution.GetProjectIdsWithDocumentFilePath(documentPath);
-        var projectIdsByAdditionalDocument = workspaceService.Solution.GetProjectIdsWithAdditionalDocumentFilePath(documentPath);
-        var projectIds = projectIdsByDocument.Concat(projectIdsByAdditionalDocument).Distinct();
-        var projects = projectIds.Select(workspaceService.Solution.GetProject).Where(p => p != null);
+        workerTasks.Add(async () => {
+            await compilationHost.AnalyzeAsync(
+                documents,
+                configurationService.CompilerDiagnosticsScope,
+                configurationService.AnalyzerDiagnosticsScope,
+                CancellationToken.None
+            ).ConfigureAwait(false);
 
-        if (projects == null || !projects.Any())
-            return Task.CompletedTask;
-        
-        if (!configurationService.UseMultitargetDiagnostics)
-            projects = projects.Take(1);
-
-        ResetClientDiagnostics(projects!);
-        return SafeExtensions.InvokeAsync(async () => {
-            await Task.Delay(AnalysisFrequencyMs, cancellationToken).ConfigureAwait(false);
-            await CompilationHost.DiagnoseAsync(projects!, cancellationToken).ConfigureAwait(false);
+            var diagnostics = compilationHost.GetDiagnostics();
+            foreach (var pair in diagnostics) {
+                await LanguageServer.Proxy.PublishDiagnostics(new PublishDiagnosticsParams {
+                    Uri = pair.Key,
+                    Diagnostics = pair.Value.Where(d => !d.IsHiddenInUI()).Select(d => d.ToServerDiagnostic()).ToList(),
+                }).ConfigureAwait(false);
+            }
         });
     }
-    public bool HasDiagnostics(string documentPath) {
-        var diagnostics = CompilationHost.GetDiagnostics(documentPath);
-        return diagnostics != null && diagnostics.Any();
+
+    public ReadOnlyCollection<DiagnosticContext> GetDiagnosticsByDocumentSpan(Document document, TextSpan span) {
+        return compilationHost.GetDiagnosticsByDocumentSpan(document, span);
     }
-    public void ResetClientDiagnostics(string documentPath) {
-        serverFacade?.TextDocument.PublishDiagnostics(new PublishDiagnosticsParams() {
-            Diagnostics = new Container<ProtocolModels.Diagnostic>(),
-            Uri = DocumentUri.FromFileSystemPath(documentPath),
-        });
+    public IEnumerable<CodeFixProvider>? GetCodeFixProvidersForDiagnosticId(string? diagnosticId, Project project) {
+        return codeActionHost.GetCodeFixProvidersForDiagnosticId(diagnosticId, project);
+    }
+    public IEnumerable<CodeRefactoringProvider>? GetCodeRefactoringProvidersForProject(Project project) {
+        return codeActionHost.GetCodeRefactoringProvidersForProject(project);
     }
 
-    private void OnDiagnosticsCollectionChanged(object? sender, DiagnosticsCollectionChangedEventArgs e) {
-        serverFacade?.TextDocument.PublishDiagnostics(new PublishDiagnosticsParams() {
-            Diagnostics = new Container<ProtocolModels.Diagnostic>(e.Diagnostics.Select(d => d.ToServerDiagnostic())),
-            Uri = DocumentUri.FromFileSystemPath(e.FilePath),
-        });
+    bool IAdditionalComponentsProvider.IsEnabled {
+        get => configurationService.AnalyzerDiagnosticsScope != AnalysisScope.None;
     }
-    private void ResetClientDiagnostics(IEnumerable<Project> projects) {
-        var documentPaths = projects.SelectMany(p => p.Documents).Select(d => d.FilePath).Distinct().Where(p => p != null);
-        foreach (var documentPath in documentPaths)
-            ResetClientDiagnostics(documentPath!);
-    }
-    private void ResetCancellationToken() {
-        compilationTokenSource?.Cancel();
-        compilationTokenSource?.Dispose();
-        compilationTokenSource = new CancellationTokenSource();
+    IEnumerable<string> IAdditionalComponentsProvider.GetAdditionalAssemblies() {
+        return configurationService.AnalyzerAssemblies;
     }
 }

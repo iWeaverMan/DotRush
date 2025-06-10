@@ -1,6 +1,6 @@
-using DotRush.Roslyn.Common.Extensions;
-using DotRush.Roslyn.Common.External;
-using DotRush.Roslyn.Common.Logging;
+using DotRush.Common.Extensions;
+using DotRush.Common.External;
+using DotRush.Common.Logging;
 using DotRush.Roslyn.Workspaces.Extensions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -18,14 +18,13 @@ public abstract class ProjectsController {
     public virtual void OnProjectRestoreCompleted(string documentPath) {}
     public virtual void OnProjectRestoreFailed(string documentPath, ProcessResult result) {}
     public virtual void OnProjectLoadStarted(string documentPath) {}
-    public virtual void OnProjectLoadCompleted(string documentPath) {}
+    public virtual void OnProjectLoadCompleted(Project project) {}
     public virtual void OnProjectCompilationStarted(string documentPath) {}
-    public virtual void OnProjectCompilationCompleted(string documentPath) {}
+    public virtual void OnProjectCompilationCompleted(Project project) {}
     protected abstract void OnWorkspaceStateChanged(Solution newSolution);
 
     protected async Task LoadProjectsAsync(MSBuildWorkspace workspace, IEnumerable<string> projectFilePaths, CancellationToken cancellationToken) {
-        CurrentSessionLogger.Debug($"Loading projects: {string.Join(';', projectFilePaths)}");
-        await OnLoadingStartedAsync(cancellationToken);
+        CurrentSessionLogger.Debug($"Loading projects: {string.Join(';', projectFilePaths)}");;
 
         foreach (var projectFile in projectFilePaths) {
             await SafeExtensions.InvokeAsync(async () => {
@@ -39,19 +38,18 @@ public abstract class ProjectsController {
 
                 OnProjectLoadStarted(projectFile);
                 var project = await workspace.OpenProjectAsync(projectFile, null, cancellationToken);
-                OnProjectLoadCompleted(projectFile);
+                OnProjectLoadCompleted(project);
 
                 OnWorkspaceStateChanged(workspace.CurrentSolution);
 
                 if (CompileProjectsAfterLoading) {
                     OnProjectCompilationStarted(projectFile);
                     _ = await project.GetCompilationAsync(cancellationToken);
-                    OnProjectCompilationCompleted(projectFile);
+                    OnProjectCompilationCompleted(project);
                 }
             });
         }
 
-        await OnLoadingCompletedAsync(cancellationToken);
         CurrentSessionLogger.Debug($"Projects loading completed, loaded {workspace.CurrentSolution.ProjectIds.Count} projects");
     }
 }

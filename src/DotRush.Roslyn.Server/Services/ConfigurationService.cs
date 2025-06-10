@@ -1,8 +1,11 @@
 using System.Collections.ObjectModel;
-using DotRush.Roslyn.Common.Logging;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using DotRush.Common.Extensions;
+using DotRush.Common.Logging;
+using DotRush.Roslyn.CodeAnalysis.Diagnostics;
 using DotRush.Roslyn.Server.Extensions;
-using Microsoft.Extensions.Configuration;
-using OmniSharp.Extensions.LanguageServer.Protocol.Server;
+using EmmyLua.LanguageServer.Framework.Protocol.Model;
 
 namespace DotRush.Roslyn.Server.Services;
 
@@ -11,65 +14,113 @@ public class ConfigurationService {
     private const string ExtensionId = "astraeus";
     private const string RoslynId = "roslyn";
 
-    private bool? showItemsFromUnimportedNamespaces;
-    public bool ShowItemsFromUnimportedNamespaces => showItemsFromUnimportedNamespaces ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:showItemsFromUnimportedNamespaces", false);
+    private const string ConfigurationFileName = "dotrush.config.json";
+    private readonly CurrentClassLogger currentClassLogger;
+    private readonly JsonSerializerOptions jsonSerializerOptions;
+    private RoslynSection? configuration;
 
-    private bool? skipUnrecognizedProjects;
-    public bool SkipUnrecognizedProjects => skipUnrecognizedProjects ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:skipUnrecognizedProjects", true);
+    public bool ShowItemsFromUnimportedNamespaces => configuration?.ShowItemsFromUnimportedNamespaces ?? false;
+    public bool TargetTypedCompletionFilter => configuration?.TargetTypedCompletionFilter ?? false;
 
-    private bool? loadMetadataForReferencedProjects;
-    public bool LoadMetadataForReferencedProjects => loadMetadataForReferencedProjects ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:loadMetadataForReferencedProjects", false);
+    public bool SkipUnrecognizedProjects => configuration?.SkipUnrecognizedProjects ?? true;
+    public bool LoadMetadataForReferencedProjects => configuration?.LoadMetadataForReferencedProjects ?? false;
+    public bool RestoreProjectsBeforeLoading => configuration?.RestoreProjectsBeforeLoading ?? true;
+    public bool CompileProjectsAfterLoading => configuration?.CompileProjectsAfterLoading ?? true;
+    public bool ApplyWorkspaceChanges => configuration?.ApplyWorkspaceChanges ?? false;
+    public AnalysisScope CompilerDiagnosticsScope => configuration?.CompilerDiagnosticsScope ?? AnalysisScope.Project;
+    public AnalysisScope AnalyzerDiagnosticsScope => configuration?.AnalyzerDiagnosticsScope ?? AnalysisScope.Document;
+    public string DotNetSdkDirectory => configuration?.DotNetSdkDirectory ?? Environment.GetEnvironmentVariable("DOTNET_SDK_PATH") ?? string.Empty;
+    public ReadOnlyDictionary<string, string> WorkspaceProperties => (configuration?.WorkspaceProperties ?? new List<string>()).ToPropertiesDictionary();
+    public ReadOnlyCollection<string> ProjectOrSolutionFiles => (configuration?.ProjectOrSolutionFiles ?? new List<string>()).AsReadOnly();
+    public ReadOnlyCollection<string> AnalyzerAssemblies => (configuration?.AnalyzerAssemblies ?? new List<string>()).AsReadOnly();
 
-    private bool? restoreProjectsBeforeLoading;
-    public bool RestoreProjectsBeforeLoading => restoreProjectsBeforeLoading ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:restoreProjectsBeforeLoading", true);
+    private readonly TaskCompletionSource initializeTaskSource;
+    public Task InitializeTask => initializeTaskSource.Task;
 
-    private bool? compileProjectsAfterLoading;
-    public bool CompileProjectsAfterLoading => compileProjectsAfterLoading ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:compileProjectsAfterLoading", true);
-
-    private bool? applyWorkspaceChanges;
-    public bool ApplyWorkspaceChanges => applyWorkspaceChanges ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:applyWorkspaceChanges", false);
-
-    private bool? useMultitargetDiagnostics;
-    public bool UseMultitargetDiagnostics => useMultitargetDiagnostics ??= configuration.GetValue($"{ExtensionId}:{RoslynId}:useMultitargetDiagnostics", true);
-
-    private ReadOnlyDictionary<string, string>? workspaceProperties;
-    public ReadOnlyDictionary<string, string> WorkspaceProperties => workspaceProperties ??= ServerExtensions.GetKeyValuePairs(configuration, $"{ExtensionId}:{RoslynId}:workspaceProperties");
-
-    private ReadOnlyCollection<string>? projectOrSolutionFiles;
-    public ReadOnlyCollection<string> ProjectOrSolutionFiles => projectOrSolutionFiles ??= ServerExtensions.GetArray(configuration, $"{ExtensionId}:{RoslynId}:projectOrSolutionFiles");
-
-
-    public ConfigurationService(ILanguageServerConfiguration configuration) {
-        this.configuration = configuration;
-    }
-    internal ConfigurationService(
-        bool showItemsFromUnimportedNamespaces,
-        bool skipUnrecognizedProjects,
-        bool loadMetadataForReferencedProjects,
-        bool restoreProjectsBeforeLoading,
-        bool compileProjectsAfterLoading,
-        bool useMultitargetDiagnostics,
-        ReadOnlyDictionary<string, string> workspaceProperties,
-        ReadOnlyCollection<string> projectOrSolutionFiles
-    ) {
-        this.showItemsFromUnimportedNamespaces = showItemsFromUnimportedNamespaces;
-        this.skipUnrecognizedProjects = skipUnrecognizedProjects;
-        this.loadMetadataForReferencedProjects = loadMetadataForReferencedProjects;
-        this.restoreProjectsBeforeLoading = restoreProjectsBeforeLoading;
-        this.compileProjectsAfterLoading = compileProjectsAfterLoading;
-        this.useMultitargetDiagnostics = useMultitargetDiagnostics;
-        this.workspaceProperties = workspaceProperties;
-        this.projectOrSolutionFiles = projectOrSolutionFiles;
+    public ConfigurationService() {
+        currentClassLogger = new CurrentClassLogger(nameof(ConfigurationService));
+        jsonSerializerOptions = new JsonSerializerOptions {
+            PropertyNameCaseInsensitive = true,
+            Converters = { new JsonStringEnumConverter() }
+        };
+        initializeTaskSource = new TaskCompletionSource();
+        var configFilePath = Path.Combine(Environment.CurrentDirectory, ConfigurationFileName);
+        if (!File.Exists(configFilePath))
+            configFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ConfigurationFileName);
+        if (File.Exists(configFilePath)) {
+            currentClassLogger.Debug($"Configuration file found: '{configFilePath}'");
+            var configuration = SafeExtensions.Invoke(() => JsonSerializer.Deserialize<ConfigurationSection>(File.ReadAllText(configFilePath), jsonSerializerOptions));
+            ChangeConfiguration(configuration);
+        }
     }
 
-    public async Task InitializeAsync() {
-        var retryCount = 0;
-        await Task.Run(() => {
-            while (!configuration.AsEnumerable().Any() && retryCount < 25) {
-                Thread.Sleep(200);
-                retryCount++;
-            }
-        }).ConfigureAwait(false);
-        CurrentSessionLogger.Debug("ConfigurationService initialized");
+    public void ChangeConfiguration(LSPAny? sectionJson) {
+        if (sectionJson?.Value is not JsonDocument jsonDocument) {
+            currentClassLogger.Error("Configuration section is not a valid JSON document.");
+            return;
+        }
+
+        var sections = SafeExtensions.Invoke(() => JsonSerializer.Deserialize<ConfigurationSection>(jsonDocument, jsonSerializerOptions));
+        ChangeConfiguration(sections);
     }
+    private void ChangeConfiguration(ConfigurationSection? section) {
+        if (section?.DotRush?.Roslyn == null) {
+            currentClassLogger.Error("Configuration section is not a valid document.");
+            return;
+        }
+
+        configuration = section.DotRush.Roslyn;
+        initializeTaskSource.TrySetResult();
+        currentClassLogger.Debug("configuration updated");
+    }
+}
+
+internal sealed class ConfigurationSection {
+    [JsonPropertyName("dotrush")]
+    public DotRushSection? DotRush { get; set; }
+    // Other sections that not related to lsp
+}
+internal sealed class DotRushSection {
+    [JsonPropertyName("roslyn")]
+    public RoslynSection? Roslyn { get; set; }
+}
+internal sealed class RoslynSection {
+    [JsonPropertyName("showItemsFromUnimportedNamespaces")]
+    public bool ShowItemsFromUnimportedNamespaces { get; set; }
+
+    [JsonPropertyName("targetTypedCompletionFilter")]
+    public bool TargetTypedCompletionFilter { get; set; }
+
+    [JsonPropertyName("skipUnrecognizedProjects")]
+    public bool SkipUnrecognizedProjects { get; set; }
+
+    [JsonPropertyName("loadMetadataForReferencedProjects")]
+    public bool LoadMetadataForReferencedProjects { get; set; }
+
+    [JsonPropertyName("restoreProjectsBeforeLoading")]
+    public bool RestoreProjectsBeforeLoading { get; set; }
+
+    [JsonPropertyName("compileProjectsAfterLoading")]
+    public bool CompileProjectsAfterLoading { get; set; }
+
+    [JsonPropertyName("applyWorkspaceChanges")]
+    public bool ApplyWorkspaceChanges { get; set; }
+
+    [JsonPropertyName("compilerDiagnosticsScope")]
+    public AnalysisScope CompilerDiagnosticsScope { get; set; }
+
+    [JsonPropertyName("analyzerDiagnosticsScope")]
+    public AnalysisScope AnalyzerDiagnosticsScope { get; set; }
+
+    [JsonPropertyName("dotnetSdkDirectory")]
+    public string? DotNetSdkDirectory { get; set; }
+
+    [JsonPropertyName("workspaceProperties")]
+    public List<string>? WorkspaceProperties { get; set; }
+
+    [JsonPropertyName("projectOrSolutionFiles")]
+    public List<string>? ProjectOrSolutionFiles { get; set; }
+
+    [JsonPropertyName("analyzerAssemblies")]
+    public List<string>? AnalyzerAssemblies { get; set; }
 }
