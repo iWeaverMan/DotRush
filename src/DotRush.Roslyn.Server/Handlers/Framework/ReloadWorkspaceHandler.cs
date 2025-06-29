@@ -28,7 +28,7 @@ public class ReloadWorkspaceHandler : IJsonHandler {
     }
 
     public void RegisterHandler(LSPCommunicationBase lspCommunication) {
-        lspCommunication.AddNotificationHandler("dotrush/reloadWorkspace", delegate (NotificationMessage message, CancellationToken token) {
+        lspCommunication.AddNotificationHandler("astraeus/reloadWorkspace", delegate (NotificationMessage message, CancellationToken token) {
             ReloadWorkspaceParams? request = message.Params?.Deserialize<ReloadWorkspaceParams>();
             return Handle(request ?? new ReloadWorkspaceParams(), token);
         });

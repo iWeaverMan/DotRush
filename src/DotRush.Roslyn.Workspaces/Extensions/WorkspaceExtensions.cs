@@ -63,11 +63,13 @@ public static class WorkspaceExtensions {
         var processInfo = ProcessRunner.CreateProcess("dotnet", $"restore \"{projectPath}\"", captureOutput: true, displayWindow: false, cancellationToken: cancellationToken);
         var restoreResult = await processInfo.Task;
 
-        if (restoreResult.ExitCode != 0) {
-            foreach (var line in restoreResult.OutputLines)
-                CurrentSessionLogger.Error(line);
-            foreach (var line in restoreResult.ErrorLines)
-                CurrentSessionLogger.Error(line);
+        if (restoreResult.ExitCode != 0 && restoreResult.ErrorLines.Count == 0) 
+        {
+            restoreResult = new ProcessResult(restoreResult.Process, 0, restoreResult.OutputLines, restoreResult.ErrorLines);
+        }
+        if (restoreResult.ExitCode != 0) 
+        {
+            CurrentSessionLogger.Debug($"Error on restoring project: {projectPath} {restoreResult.ExitCode}\nOutput: {restoreResult.GetOutput()}\nError: {restoreResult.GetError()}");
         }
 
         return restoreResult;

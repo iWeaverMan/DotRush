@@ -10,11 +10,7 @@ using EmmyLua.LanguageServer.Framework.Protocol.Model;
 namespace DotRush.Roslyn.Server.Services;
 
 public class ConfigurationService {
-    private readonly ILanguageServerConfiguration? configuration;
-    private const string ExtensionId = "astraeus";
-    private const string RoslynId = "roslyn";
-
-    private const string ConfigurationFileName = "dotrush.config.json";
+    private const string ConfigurationFileName = "astraeus.config.json";
     private readonly CurrentClassLogger currentClassLogger;
     private readonly JsonSerializerOptions jsonSerializerOptions;
     private RoslynSection? configuration;
@@ -64,23 +60,23 @@ public class ConfigurationService {
         ChangeConfiguration(sections);
     }
     private void ChangeConfiguration(ConfigurationSection? section) {
-        if (section?.DotRush?.Roslyn == null) {
+        if (section?.Aastraeus?.Roslyn == null) {
             currentClassLogger.Error("Configuration section is not a valid document.");
             return;
         }
 
-        configuration = section.DotRush.Roslyn;
+        configuration = section.Aastraeus.Roslyn;
         initializeTaskSource.TrySetResult();
         currentClassLogger.Debug("configuration updated");
     }
 }
 
 internal sealed class ConfigurationSection {
-    [JsonPropertyName("dotrush")]
-    public DotRushSection? DotRush { get; set; }
+    [JsonPropertyName("astraeus")]
+    public AstraeusSection? Aastraeus { get; set; }
     // Other sections that not related to lsp
 }
-internal sealed class DotRushSection {
+internal sealed class AstraeusSection {
     [JsonPropertyName("roslyn")]
     public RoslynSection? Roslyn { get; set; }
 }

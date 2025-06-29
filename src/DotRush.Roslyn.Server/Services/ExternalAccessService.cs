@@ -13,6 +13,6 @@ public class ExternalAccessService {
         if (transportId == null || transportId <= 0)
             return Task.CompletedTask;
 
-        return rpcServerHost.RunAsync($"dotrush-{transportId}", cancellationToken);
+        return rpcServerHost.RunAsync($"astraeus-{transportId}", cancellationToken);
     }
 }

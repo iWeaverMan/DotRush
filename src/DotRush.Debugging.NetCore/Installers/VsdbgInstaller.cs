@@ -88,7 +88,7 @@ public class VsdbgInstaller : IDebuggerInstaller {
             stream.CopyTo(fileStream);
         }
 
-        var executable = Path.Combine(debuggerDirectory, "vsdbg-ui" + RuntimeInfo.ExecExtension);
+        var executable = Path.Combine(debuggerDirectory, "vsdbg" + RuntimeInfo.ExecExtension);
         if (!File.Exists(executable)) {
             CurrentSessionLogger.Error($"Debugger executable not found: '{executable}'");
             return null;
